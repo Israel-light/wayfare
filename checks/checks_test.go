@@ -1363,6 +1363,113 @@ func TestPriceImpactMetricDescriptorIsValid(t *testing.T) {
 	}
 }
 
+// TestPriceImpactMetricMalfunctionReferenceIsUndetermined guards issue #161:
+// when the reference cross-check is MALFUNCTION, no derived quantity may be
+// computed because the benchmark itself is suspect. Price impact is one such
+// derived quantity — a precise-looking percentage would misrepresent a
+// measurement that cannot be validated.
+func TestPriceImpactMetricMalfunctionReferenceIsUndetermined(t *testing.T) {
+	poisoned := &dex.Client{HorizonURL: "http://127.0.0.1:1"} // must never be dialed
+
+	subject := Subject{
+		Send:               asset.USDC(),
+		Receive:            asset.NGNC(),
+		ReferenceAgreement: "MALFUNCTION",
+	}
+
+	impact := PriceImpactMetric{
+		DEX:       poisoned,
+		ProbeSize: decimal.NewFromInt(1),
+		FullSize:  decimal.NewFromInt(100),
+	}
+	r := RunMetric(ctx(), impact, subject)
+
+	if r.Determined {
+		t.Error("a MALFUNCTION reference must not produce a determined price impact")
+	}
+	if !strings.Contains(r.Reason, "MALFUNCTION") {
+		t.Errorf("reason = %q, want it to name MALFUNCTION as the cause", r.Reason)
+	}
+	if !strings.Contains(r.Reason, "unscorable") {
+		t.Errorf("reason = %q, want it to name the unscorable reference", r.Reason)
+	}
+}
+
+// TestPriceImpactMetricMalfunctionShortCircuitsBeforeNetwork guards that the
+// MALFUNCTION check runs before any network call. The poisoned client above
+// must never be dialed — this test would hang or fail if the guard were
+// placed after the pathfinding calls.
+func TestPriceImpactMetricMalfunctionShortCircuitsBeforeNetwork(t *testing.T) {
+	poisoned := &dex.Client{HorizonURL: "http://127.0.0.1:1"}
+
+	subject := Subject{
+		Send:               asset.USDC(),
+		Receive:            asset.NGNC(),
+		ReferenceAgreement: "MALFUNCTION",
+	}
+
+	start := time.Now()
+	r := RunMetric(ctx(), PriceImpactMetric{DEX: poisoned}, subject)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("took %s; a MALFUNCTION short-circuit should return immediately, "+
+			"without attempting to dial %s", elapsed, poisoned.HorizonURL)
+	}
+	if r.Determined {
+		t.Fatal("expected an undetermined result")
+	}
+}
+
+// TestPriceImpactMetricEmptyReferenceAgreementProceeds pins that an empty
+// (unknown) ReferenceAgreement does not suppress the metric. Absent
+// information is not evidence of malfunction — the metric proceeds when the
+// caller has not supplied a reference agreement state.
+func TestPriceImpactMetricEmptyReferenceAgreementProceeds(t *testing.T) {
+	m := loadOrderBookSnapshot(t, "usdc-ngnc-strictsend")
+	c := &dex.Client{HorizonURL: "https://horizon.stellar.org", HTTPClient: m.HTTPClient()}
+
+	impact := PriceImpactMetric{
+		DEX:       c,
+		ProbeSize: decimal.NewFromInt(1),
+		FullSize:  decimal.NewFromInt(100),
+	}
+
+	// Empty ReferenceAgreement — the caller did not supply one.
+	r := RunMetric(ctx(), impact, Subject{
+		Send:    asset.USDC(),
+		Receive: asset.NGNC(),
+	})
+
+	if !r.Determined {
+		t.Fatalf("price impact with empty ReferenceAgreement should still determine, got: %s", r.Reason)
+	}
+}
+
+// TestPriceImpactMetricScorableReferenceAgreementsProceeds pins that
+// non-MALFUNCTION agreement states (AGREE, DISAGREE, SINGLE, STALE) do not
+// suppress the metric. Only MALFUNCTION does.
+func TestPriceImpactMetricScorableReferenceAgreementsProceeds(t *testing.T) {
+	m := loadOrderBookSnapshot(t, "usdc-ngnc-strictsend")
+	c := &dex.Client{HorizonURL: "https://horizon.stellar.org", HTTPClient: m.HTTPClient()}
+
+	impact := PriceImpactMetric{
+		DEX:       c,
+		ProbeSize: decimal.NewFromInt(1),
+		FullSize:  decimal.NewFromInt(100),
+	}
+
+	for _, agree := range []string{"AGREE", "DISAGREE", "SINGLE", "STALE"} {
+		r := RunMetric(ctx(), impact, Subject{
+			Send:               asset.USDC(),
+			Receive:            asset.NGNC(),
+			ReferenceAgreement: agree,
+		})
+		if !r.Determined {
+			t.Errorf("ReferenceAgreement=%s should not suppress price impact, got undetermined: %s",
+				agree, r.Reason)
+		}
+	}
+}
+
 // deviation metric --------------------------------------------------------------
 //
 // See GitHub issue #103: the gap between the direct book's implied mid and
