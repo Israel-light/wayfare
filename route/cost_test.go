@@ -82,7 +82,6 @@ if aFee.Reason == "" {
 
 slippage := d.Parts[3]
 
-	aFee := d.Parts[2]
 	if aFee.Component != CostAnchorFee {
 		t.Errorf("third component = %s, want anchor_fee", aFee.Component)
 	}
