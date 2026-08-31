@@ -59,29 +59,17 @@ func TestCostDecomposeSplitsCorrectly(t *testing.T) {
 	}
 
 	netFees := d.Parts[1]
-if netFees.Component != CostNetworkFees {
-	t.Errorf("second component = %s, want network_fees", netFees.Component)
-}
-if netFees.Determined {
-	t.Error("network_fees must be undetermined when the network fee and operation count are not known")
-}
-if netFees.Reason == "" {
-	t.Error("undetermined network_fees must carry a reason")
-}
+	if netFees.Component != CostNetworkFees {
+		t.Errorf("second component = %s, want network_fees", netFees.Component)
+	}
+	if netFees.Determined {
+		t.Error("network_fees must be undetermined when the network fee and operation count are not known")
+	}
+	if netFees.Reason == "" {
+		t.Error("undetermined network_fees must carry a reason")
+	}
 
-aFee := d.Parts[2]
-if aFee.Component != CostAnchorFee {
-	t.Errorf("third component = %s, want anchor_fee", aFee.Component)
-}
-if aFee.Determined {
-	t.Error("anchor_fee must be undetermined when the anchor does not publish a quote server")
-}
-if aFee.Reason == "" {
-	t.Error("undetermined anchor_fee must carry a reason")
-}
-
-slippage := d.Parts[3]
-
+	aFee := d.Parts[2]
 	if aFee.Component != CostAnchorFee {
 		t.Errorf("third component = %s, want anchor_fee", aFee.Component)
 	}
