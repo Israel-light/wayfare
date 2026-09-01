@@ -282,12 +282,15 @@ func TestCostBlockJSONShape(t *testing.T) {
 	// from network fees (#169): an anchor's own charge is obtainable via
 	// SEP-38 when one publishes ANCHOR_QUOTE_SERVER; the absence is a fact
 	// about the anchor.
+	// The determined component carries amount and pct as strings; the
+	// undetermined ones carry none, only a reason.
 	if got := componentOf(t, parts[0]); got != string(CostFXLoss) {
 		t.Fatalf("parts[0].component = %q, want %q", got, CostFXLoss)
 	}
 	assertDeterminedDecimalStrings(t, parts[0], "fx_loss")
 
 	for _, idx := range []int{1, 2, 3, 4} {
+	for _, idx := range []int{1, 2, 3} {
 		p := parts[idx]
 		if got := componentOf(t, p); got == string(CostFXLoss) {
 			t.Fatalf("parts[%d].component = %q, want a non-fx component", idx, got)
