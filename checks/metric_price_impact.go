@@ -152,7 +152,7 @@ func (m PriceImpactMetric) RunCurve(ctx context.Context, s Subject) (*PriceImpac
 	// looking percentage would misrepresent a measurement that cannot be
 	// validated. See issue #161.
 	if s.ReferenceAgreement == referenceAgreementMalfunction {
-		return MetricUndetermined(d, s, fmt.Sprintf(
+		return nil, MetricUndetermined(d, s, fmt.Sprintf(
 			"reference cross-check is MALFUNCTION: the two providers disagreed "+
 				"too far apart to trust either, so no derived quantity (including "+
 				"price impact) may be computed against an unscorable reference"))
@@ -161,13 +161,6 @@ func (m PriceImpactMetric) RunCurve(ctx context.Context, s Subject) (*PriceImpac
 		return nil, MetricUndetermined(d, s, "no DEX client available to price paths")
 	}
 
-	probe := m.ProbeSize
-	if !probe.IsPositive() {
-		return MetricUndetermined(d, s, "probe size is unset or invalid (must be greater than zero)")
-	}
-	full := m.FullSize
-	if !full.IsPositive() {
-		return MetricUndetermined(d, s, "full size is unset or invalid (must be greater than zero)")
 	sizes := m.sizes()
 	if len(sizes) == 0 {
 		return nil, MetricUndetermined(d, s, "no sizes to probe")

@@ -1616,6 +1616,28 @@ func TestPriceImpactMetricMalfunctionShortCircuitsBeforeNetwork(t *testing.T) {
 // information is not evidence of malfunction — the metric proceeds when the
 // caller has not supplied a reference agreement state.
 func TestPriceImpactMetricEmptyReferenceAgreementProceeds(t *testing.T) {
+	m := loadOrderBookSnapshot(t, "usdc-ngnc-strictsend")
+	c := &dex.Client{HorizonURL: "https://horizon.stellar.org", HTTPClient: m.HTTPClient()}
+
+	impact := PriceImpactMetric{
+		DEX: c,
+		Sizes: []decimal.Decimal{
+			decimal.NewFromInt(1),
+			decimal.NewFromInt(100),
+		},
+	}
+
+	// Empty ReferenceAgreement — the caller did not supply one.
+	r := RunMetric(ctx(), impact, Subject{
+		Send:    asset.USDC(),
+		Receive: asset.NGNC(),
+	})
+
+	if !r.Determined {
+		t.Fatalf("price impact with empty ReferenceAgreement should still determine, got: %s", r.Reason)
+	}
+}
+
 // price impact curve -----------------------------------------------------------
 //
 // GitHub issue #159: PriceImpactMetric should report the full curve shape
@@ -1723,6 +1745,44 @@ func TestPriceImpactCurveBackwardCompatibleProbeFull(t *testing.T) {
 // non-MALFUNCTION agreement states (AGREE, DISAGREE, SINGLE, STALE) do not
 // suppress the metric. Only MALFUNCTION does.
 func TestPriceImpactMetricScorableReferenceAgreementsProceeds(t *testing.T) {
+	m := loadOrderBookSnapshot(t, "usdc-ngnc-strictsend")
+	c := &dex.Client{HorizonURL: "https://horizon.stellar.org", HTTPClient: m.HTTPClient()}
+
+	impact := PriceImpactMetric{
+		DEX: c,
+		Sizes: []decimal.Decimal{
+			decimal.NewFromInt(1),
+			decimal.NewFromInt(100),
+		},
+	}
+
+	for _, agree := range []string{"AGREE", "DISAGREE", "SINGLE", "STALE"} {
+		r := RunMetric(ctx(), impact, Subject{
+			Send:               asset.USDC(),
+			Receive:            asset.NGNC(),
+			ReferenceAgreement: agree,
+		})
+		if !r.Determined {
+			t.Errorf("ReferenceAgreement=%s should not suppress price impact, got undetermined: %s",
+				agree, r.Reason)
+		}
+	}
+}
+
+func TestPriceImpactCurveFlatWhenRatesIdentical(t *testing.T) {
+	// The usdc-ngnc-strictsend snapshot returns the same body for both
+	// sizes → the curve should be flat (zero impact at every point).
+	m := loadOrderBookSnapshot(t, "usdc-ngnc-strictsend")
+	c := &dex.Client{HorizonURL: "https://horizon.stellar.org", HTTPClient: m.HTTPClient()}
+
+	impact := PriceImpactMetric{
+		DEX: c,
+		Sizes: []decimal.Decimal{
+			decimal.NewFromInt(1),
+			decimal.NewFromInt(100),
+		},
+	}
+
 	curve, r := impact.RunCurve(ctx(), Subject{Send: asset.USDC(), Receive: asset.NGNC()})
 
 	if !r.Determined {
@@ -1738,50 +1798,6 @@ func TestPriceImpactMetricScorableReferenceAgreementsProceeds(t *testing.T) {
 	if !curve.Points[1].ImpactPct.IsZero() {
 		t.Errorf("impact = %s, want 0 when both sizes return the same rate",
 			curve.Points[1].ImpactPct)
-	}
-}
-
-func TestPriceImpactCurveFlatWhenRatesIdentical(t *testing.T) {
-	// The usdc-ngnc-strictsend snapshot returns the same body for both
-	// sizes → the curve should be flat (zero impact at every point).
-	m := loadOrderBookSnapshot(t, "usdc-ngnc-strictsend")
-	c := &dex.Client{HorizonURL: "https://horizon.stellar.org", HTTPClient: m.HTTPClient()}
-
-	impact := PriceImpactMetric{
-		DEX:       c,
-		ProbeSize: decimal.NewFromInt(1),
-		FullSize:  decimal.NewFromInt(100),
-	}
-
-	for _, agree := range []string{"AGREE", "DISAGREE", "SINGLE", "STALE"} {
-		r := RunMetric(ctx(), impact, Subject{
-			Send:               asset.USDC(),
-			Receive:            asset.NGNC(),
-			ReferenceAgreement: agree,
-		})
-		if !r.Determined {
-			t.Errorf("ReferenceAgreement=%s should not suppress price impact, got undetermined: %s",
-				agree, r.Reason)
-		}
-	}
-		DEX:   c,
-		Sizes: []decimal.Decimal{decimal.NewFromInt(1), decimal.NewFromInt(100)},
-	}
-	curve, r := impact.RunCurve(ctx(), Subject{Send: asset.USDC(), Receive: asset.NGNC()})
-
-	if !r.Determined {
-		t.Fatalf("undetermined: %s", r.Reason)
-	}
-	if curve == nil {
-		t.Fatal("nil curve")
-	}
-	for i, p := range curve.Points {
-		if !p.ImpactPct.IsZero() {
-			t.Errorf("point %d impact = %s, want 0 on a flat curve", i, p.ImpactPct)
-		}
-	}
-	if !r.Value.IsZero() {
-		t.Errorf("max impact = %s, want 0 on a flat curve", r.Value)
 	}
 }
 
