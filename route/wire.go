@@ -17,6 +17,16 @@ import (
 // rounding bug this project refuses internally.
 
 type QuoteJSON struct {
+	// Kind is "dex" or "anchor-sep38" — see route.Kind. On-chain DEX
+	// liquidity and an anchor's own RFQ rails are two different markets
+	// that can price the same pair differently, and Source alone (a free
+	// -form domain or "stellar-dex") makes a client re-derive that
+	// distinction from a string it was never guaranteed to parse. Every
+	// quote in a response is "dex" today — see route.KindAnchorSEP38 — but
+	// the field is on the wire from the start so a caller never has to
+	// guess which rail a figure came from, and the two are never silently
+	// conflated into one number.
+	Kind          string   `json:"kind"`
 	Description   string   `json:"description"`
 	Source        string   `json:"source"`
 	ReceiveAmount string   `json:"receive_amount"`
@@ -24,6 +34,7 @@ type QuoteJSON struct {
 	LossPct       string   `json:"loss_pct"`
 	LossAmount    string   `json:"loss_amount,omitempty"`
 	Verdict       string   `json:"verdict"`
+	PathCount     int      `json:"path_count,omitempty"`
 	Warnings      []string `json:"warnings"`
 }
 
@@ -50,14 +61,32 @@ type CostBlockJSON struct {
 	TotalLossPct string         `json:"total_loss_pct"`
 }
 
+type ExecutionRatePointJSON struct {
+	Size   string `json:"size"`
+	Rate   string `json:"rate,omitempty"`
+	Priced bool   `json:"priced"`
+	Reason string `json:"reason,omitempty"`
+}
+
+type ExecutionRateCurveJSON struct {
+	Points           []ExecutionRatePointJSON `json:"points"`
+	PricedCount      int                      `json:"priced_count"`
+	ObservationCount int                      `json:"observation_count"`
+	NonMonotonic     bool                     `json:"non_monotonic"`
+}
+
 type RungJSON struct {
-	SendAmount string         `json:"send_amount"`
-	Priced     bool           `json:"priced"`
-	Integrity  string         `json:"integrity"`
-	Quote      *QuoteJSON     `json:"quote"`
-	Cost       *CostBlockJSON `json:"cost,omitempty"`
-	Notes      []string       `json:"notes"`
-	Error      string         `json:"error,omitempty"`
+	SendAmount   string         `json:"send_amount"`
+	MarginalCost string         `json:"marginal_cost,omitempty"`
+	MarginalFrom string         `json:"marginal_from,omitempty"`
+	MarginalTo   string         `json:"marginal_to,omitempty"`
+	Priced       bool           `json:"priced"`
+	Integrity    string         `json:"integrity"`
+	PathCount    int            `json:"path_count,omitempty"`
+	Quote        *QuoteJSON     `json:"quote"`
+	Cost         *CostBlockJSON `json:"cost,omitempty"`
+	Notes        []string       `json:"notes"`
+	Error        string         `json:"error,omitempty"`
 }
 
 type CorridorJSON struct {
@@ -84,6 +113,14 @@ type CorridorJSON struct {
 	ReferenceDivergencePct   string `json:"reference_divergence_pct,omitempty"`
 	ReferenceNote            string `json:"reference_note,omitempty"`
 	Scored                   bool   `json:"scored"`
+
+	// ReferenceAsOf is the upstream provider's rate timestamp. Omitted if
+	// the provider provided no timestamp.
+	ReferenceAsOf string `json:"reference_as_of,omitempty"`
+
+	// ReferenceSecondaryAsOf is the second provider's rate timestamp.
+	// Omitted if absent.
+	ReferenceSecondaryAsOf string `json:"reference_secondary_as_of,omitempty"`
 
 	// ReferenceFetchedAt is when the rate was last obtained from the
 	// provider, which differs from reference_as_of: as-of is the upstream's
@@ -132,9 +169,10 @@ type CorridorJSON struct {
 	// and nothing here feeds back into either.
 	Findings *checks.FindingsJSON `json:"findings,omitempty"`
 
-	Finding    string     `json:"finding"`
-	Rungs      []RungJSON `json:"rungs"`
-	MeasuredAt string     `json:"measured_at"`
+	Finding    string                  `json:"finding"`
+	Curve      *ExecutionRateCurveJSON `json:"curve"`
+	Rungs      []RungJSON              `json:"rungs"`
+	MeasuredAt string                  `json:"measured_at"`
 }
 
 // StaleJSON labels a reading served from history rather than measured now.
@@ -149,14 +187,33 @@ type StaleJSON struct {
 	AgeHuman   string `json:"age_human"`
 }
 
+// AssetJSON identifies an asset on the wire.
+//
+// Code and Issuer are kept as separate fields for a reader who wants one or
+// the other without parsing a string. Asset carries the same identity in the
+// single wire form the README specifies — "stellar:CODE:ISSUER",
+// "stellar:native", or "iso4217:CODE" — which is also the SEP-38 asset
+// identification format this project already speaks everywhere else, so a
+// client comparing an asset here against a SEP-38 quote request or response
+// can compare the strings directly rather than reassembling one from parts.
+//
+// Asset is empty whenever the source asset.Asset is not Identifiable — an
+// issued Stellar asset with no issuer, in particular — and on a wire producer
+// that has only a bare code to work from at all (see route.AssetJSON{Code:
+// code} call sites), because in both cases a wire form built from a guess
+// would state an identity nothing verified.
 type AssetJSON struct {
 	Code   string `json:"code"`
 	Issuer string `json:"issuer,omitempty"`
 	Peg    string `json:"peg,omitempty"`
+	Asset  string `json:"asset,omitempty"`
 }
 
 func ToAssetJSON(a asset.Asset) AssetJSON {
 	j := AssetJSON{Code: a.Code, Issuer: a.Issuer}
+	if a.Identifiable() {
+		j.Asset = a.SEP38()
+	}
 	if peg, ok := asset.FiatPeg(a); ok {
 		j.Peg = peg
 	}
@@ -172,13 +229,15 @@ func ToQuoteJSON(q *Quote) *QuoteJSON {
 		w = []string{}
 	}
 	return &QuoteJSON{
+		Kind:          string(q.Kind),
 		Description:   q.Description,
 		Source:        q.Source,
 		ReceiveAmount: q.ReceiveAmount.String(),
 		EffectiveRate: q.EffectiveRate.String(),
-		LossPct:       q.LossPct.StringFixed(2),
+		LossPct:       q.LossPct.String(),
 		LossAmount:    q.LossAmount.StringFixed(2),
 		Verdict:       q.Verdict.String(),
+		PathCount:     q.PathCount,
 		Warnings:      w,
 	}
 }
@@ -233,9 +292,15 @@ func ToCorridorJSON(l *LadderResult, pair string) CorridorJSON {
 		Rungs:              make([]RungJSON, 0, len(l.Rungs)),
 		MeasuredAt:         time.Now().UTC().Format(time.RFC3339),
 	}
+	if !l.Reference.AsOf.IsZero() {
+		out.ReferenceAsOf = l.Reference.AsOf.UTC().Format(time.RFC3339)
+	}
 	if !l.Reference.SecondaryMid.IsZero() {
 		out.ReferenceSecondaryMid = l.Reference.SecondaryMid.String()
 		out.ReferenceSecondarySource = l.Reference.SecondarySource
+	}
+	if !l.Reference.SecondaryAsOf.IsZero() {
+		out.ReferenceSecondaryAsOf = l.Reference.SecondaryAsOf.UTC().Format(time.RFC3339)
 	}
 	if !l.Reference.FetchedAt.IsZero() {
 		out.ReferenceFetchedAt = l.Reference.FetchedAt.UTC().Format(time.RFC3339)
@@ -256,6 +321,22 @@ func ToCorridorJSON(l *LadderResult, pair string) CorridorJSON {
 	if l.Recommended != nil {
 		out.RecommendedSize = l.RecommendedSize.String()
 	}
+	if l.Curve != nil {
+		out.Curve = &ExecutionRateCurveJSON{
+			Points:           make([]ExecutionRatePointJSON, 0, len(l.Curve.Points)),
+			PricedCount:      l.Curve.PricedCount,
+			ObservationCount: l.Curve.ObservationCount,
+			NonMonotonic:     l.Curve.NonMonotonic,
+		}
+		for _, p := range l.Curve.Points {
+			point := ExecutionRatePointJSON{Size: p.Size.String(), Priced: p.Priced, Reason: p.Reason}
+			if p.Priced {
+				point.Rate = p.Rate.String()
+			}
+			out.Curve.Points = append(out.Curve.Points, point)
+		}
+	}
+
 	for _, d := range l.DependsOn {
 		out.DependsOn = append(out.DependsOn, ToAssetJSON(d))
 	}
@@ -267,6 +348,11 @@ func ToCorridorJSON(l *LadderResult, pair string) CorridorJSON {
 			Integrity:  IntegrityUnknown.String(),
 			Notes:      []string{},
 		}
+		if r.MarginalCost != nil {
+			rj.MarginalCost = r.MarginalCost.Cost.String()
+			rj.MarginalFrom = r.MarginalCost.From.String()
+			rj.MarginalTo = r.MarginalCost.To.String()
+		}
 		if r.Err != nil {
 			rj.Error = r.Err.Error()
 		}
@@ -276,7 +362,9 @@ func ToCorridorJSON(l *LadderResult, pair string) CorridorJSON {
 				rj.Notes = r.Result.Notes
 			}
 			if len(r.Result.Quotes) > 0 {
-				rj.Quote = ToQuoteJSON(&r.Result.Quotes[0])
+				q := &r.Result.Quotes[0]
+				rj.PathCount = q.PathCount
+				rj.Quote = ToQuoteJSON(q)
 			}
 		}
 		if len(r.Decomposition.Parts) > 0 {
